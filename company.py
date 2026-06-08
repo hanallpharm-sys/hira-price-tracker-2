@@ -80,10 +80,11 @@ def build_matrix(maker_kw: str = DEFAULT_MAKER, labels=None, snapshots: dict = N
                 row[m] = "X"
         # 상태 판정
         first_present = next((i for i, m in enumerate(months) if row[m] != "X"), None)
-        last_present = next((i for i, m in reversed(list(enumerate(months))) if row[m] != "X"), None)
+        n = len(months)
         flags = []
-        if months[0] in per_month and row[months[0]] == "X" and last_present is not None:
-            flags.append("신규")            # 최초 월엔 없고 이후 등장
+        # 신규: '가장 최근 달'에 처음 등장한 제품만. (이전 달에 등장한 옛 신규는 유지)
+        if first_present is not None and first_present == n - 1 and n > 1:
+            flags.append("신규")
         if row[months[-1]] == "X" and first_present is not None:
             flags.append("삭제")            # 최신 월에 사라짐
         prices = [p for p in present]
