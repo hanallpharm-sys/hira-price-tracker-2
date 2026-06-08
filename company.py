@@ -94,9 +94,25 @@ def build_matrix(maker_kw: str = DEFAULT_MAKER, labels=None, snapshots: dict = N
         rows.append(row)
 
     mat = pd.DataFrame(rows)
-    # 정렬: 삭제 > 신규 > 변동 > 유지
-    order = {"삭제": 0, "신규": 1, "변동": 2, "유지": 3}
-    mat["_sort"] = mat["status"].map(lambda s: min((order.get(x, 3) for x in s.split(", ")), default=3))
+
+    # 정렬 순위: 그 해에 '변화'가 있었던 제품을 위로.
+    # 삭제(0) > 신규 등장 이력(1) > 변동(2) > 유지(3).
+    # 상태 라벨('신규'는 최신 달만)과 무관하게, 옛 신규도 등장 이력으로 위쪽에 배치.
+    def _rank(row):
+        present_vals = [row[m] for m in months if row[m] != "X"]
+        first_present = next((i for i, m in enumerate(months) if row[m] != "X"), None)
+        is_removed = row[months[-1]] == "X" and first_present is not None
+        had_new = first_present is not None and first_present > 0   # 첫 달 이후 등장 = 신규 이력
+        varied = len(set(present_vals)) > 1
+        if is_removed:
+            return 0
+        if had_new:
+            return 1
+        if varied:
+            return 2
+        return 3
+
+    mat["_sort"] = mat.apply(_rank, axis=1)
     mat = mat.sort_values(["_sort", "name"]).drop(columns="_sort").reset_index(drop=True)
     return mat, months
 
