@@ -182,9 +182,10 @@ if not len(table):
 else:
     st.dataframe(style_matrix(table, mon), use_container_width=True, height=480)
 
-# ── 변동·삭제 사유 기록 ──
+# ── 변동·삭제 사유 기록 (신규 제외) ──
 st.markdown("### 변동·삭제 사유 기록")
-editable = mat[mat["status"] != "유지"][["code", "name", "status", "사유"]].copy()
+mask = mat["status"].str.contains("삭제") | mat["status"].str.contains("변동")
+editable = mat[mask][["code", "name", "status", "사유"]].copy()
 editable = editable.rename(columns={"name": "제품명", "status": "상태"})
 
 if len(editable) == 0:
