@@ -9,16 +9,59 @@ monthly_data/ 폴더의 약제급여목록표 엑셀들을 읽어,
 import os
 import glob
 import io
+import json
+import base64
 
 import pandas as pd
+import requests
 import streamlit as st
 
 import parser
 import company
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "monthly_data")
+NOTES_PATH = os.path.join(os.path.dirname(__file__), "notes.json")
 
 st.set_page_config(page_title="약제급여목록표 변동 추적", page_icon="💊", layout="wide")
+
+
+def load_notes():
+    """notes.json(제품코드 -> 사유)을 읽는다. 세션에서 수정한 값이 있으면 우선."""
+    notes = {}
+    if os.path.exists(NOTES_PATH):
+        try:
+            with open(NOTES_PATH, encoding="utf-8") as f:
+                notes = json.load(f)
+        except Exception:
+            notes = {}
+    notes.update(st.session_state.get("notes_override", {}))
+    return notes
+
+
+def github_enabled():
+    return "GITHUB_TOKEN" in st.secrets
+
+
+def save_notes_github(notes: dict) -> bool:
+    """notes.json을 GitHub 레포에 커밋(토큰 필요)."""
+    token = st.secrets["GITHUB_TOKEN"]
+    repo = st.secrets.get("GITHUB_REPO", "hanallpharm-sys/hira-price-tracker")
+    branch = st.secrets.get("GITHUB_BRANCH", "main")
+    url = f"https://api.github.com/repos/{repo}/contents/notes.json"
+    headers = {"Authorization": f"Bearer {token}",
+               "Accept": "application/vnd.github+json"}
+    sha = None
+    r = requests.get(url, headers=headers, params={"ref": branch}, timeout=20)
+    if r.status_code == 200:
+        sha = r.json().get("sha")
+    content = base64.b64encode(
+        json.dumps(notes, ensure_ascii=False, indent=2).encode("utf-8")
+    ).decode()
+    payload = {"message": "사유 업데이트", "content": content, "branch": branch}
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(url, headers=headers, json=payload, timeout=20)
+    return r.status_code in (200, 201)
 
 
 @st.cache_data(show_spinner="약제급여목록표를 읽는 중...")
@@ -126,30 +169,81 @@ c2.metric("신규 등재", f"{int(n_add)}")
 c3.metric("삭제", f"{int(n_rem)}")
 c4.metric("상한금액 변동", f"{int(n_chg)}")
 
+# 사유(notes) 병합
+notes = load_notes()
+mat["사유"] = mat["code"].map(lambda c: notes.get(c, "")).fillna("")
+
 st.subheader(f"{maker} · 월별 상한금액")
 view = st.radio("보기", ["변동 있는 품목만", "전체"], horizontal=True, label_visibility="collapsed")
-table = changed if view == "변동 있는 품목만" else mat
+table = changed.copy() if view == "변동 있는 품목만" else mat.copy()
+table["사유"] = table["code"].map(lambda c: notes.get(c, "")).fillna("")
 if not len(table):
     st.success("해당 기간 동안 변동(신규/삭제/금액변경)이 없습니다.")
 else:
-    st.dataframe(style_matrix(table, mon), use_container_width=True, height=560)
+    st.dataframe(style_matrix(table, mon), use_container_width=True, height=480)
 
-# 엑셀 다운로드
-buf = io.BytesIO()
+# ── 변동·삭제 사유 기록 ──
+st.markdown("### 변동·삭제 사유 기록")
+editable = mat[mat["status"] != "유지"][["code", "name", "status", "사유"]].copy()
+editable = editable.rename(columns={"name": "제품명", "status": "상태"})
+
+if len(editable) == 0:
+    st.caption("기록할 변동/삭제 품목이 없습니다.")
+elif github_enabled():
+    st.caption("사유 칸을 클릭해 입력하고 아래 **저장** 버튼을 누르면 모두에게 반영됩니다.")
+    edited = st.data_editor(
+        editable, use_container_width=True, hide_index=True, key="notes_editor",
+        column_config={
+            "code": None,
+            "제품명": st.column_config.TextColumn(disabled=True, width="large"),
+            "상태": st.column_config.TextColumn(disabled=True, width="small"),
+            "사유": st.column_config.TextColumn("사유", width="large"),
+        },
+    )
+    if st.button("💾 사유 저장", type="primary"):
+        new_notes = dict(notes)
+        for _, r in edited.iterrows():
+            txt = (r["사유"] or "").strip()
+            if txt:
+                new_notes[r["code"]] = txt
+            elif r["code"] in new_notes:
+                del new_notes[r["code"]]
+        with st.spinner("저장 중..."):
+            ok = save_notes_github(new_notes)
+        if ok:
+            st.session_state["notes_override"] = new_notes
+            st.success("저장되었습니다. 잠시 후 모든 사용자에게 반영됩니다.")
+        else:
+            st.error("저장 실패. GitHub 토큰 권한(Contents: Read and write)을 확인해 주세요.")
+else:
+    st.info(
+        "지금은 **읽기 전용**이에요. 앱에서 직접 입력하려면 GitHub 토큰 등록이 필요합니다(아래 안내).\n\n"
+        "토큰 없이 쓰려면 레포의 **notes.json**을 GitHub에서 편집하세요. "
+        '형식: `{\"제품코드\": \"사유\"}` — 예: `{\"645302132\": \"사용량-약가 연동 인하\"}`'
+    )
+    st.dataframe(editable.drop(columns="code"), use_container_width=True, hide_index=True)
+
+# 엑셀 다운로드 (사유 포함)
 tmp = "/tmp/_company_matrix.xlsx"
 company.to_excel(maker, mat, mon, tmp)
 with open(tmp, "rb") as f:
-    buf.write(f.read())
+    data_bytes = f.read()
 st.download_button(
-    "📥 엑셀로 다운로드", data=buf.getvalue(),
+    "📥 엑셀로 다운로드 (사유 포함)", data=data_bytes,
     file_name=f"{maker}_월별상한금액_{mon[0]}_{mon[-1]}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
-with st.expander("ℹ️ 매달 업데이트하는 방법"):
+with st.expander("ℹ️ 매달 업데이트 / 사유 입력용 토큰 등록 방법"):
     st.markdown(
-        "1. GitHub 레포 → **monthly_data** 폴더 열기  \n"
-        "2. **Add file → Upload files**로 새 달 엑셀(.xlsx) 올리고 **Commit**  \n"
-        "3. 1~2분 뒤 이 앱이 자동으로 새 달을 반영합니다(열이 하나 늘어남).  \n\n"
-        "적용월은 파일명/시트명에서 자동 인식되므로 파일명은 그대로 두셔도 됩니다."
+        "**매달 데이터 추가**  \n"
+        "1. GitHub 레포 → **monthly_data** 폴더 → Add file → Upload files로 새 달 엑셀 올리고 Commit  \n"
+        "2. 1~2분 뒤 자동 반영(열 하나 추가)  \n\n"
+        "**앱에서 직접 사유 입력하려면 (일회성 토큰 등록)**  \n"
+        "1. GitHub 우상단 프로필 → Settings → Developer settings → "
+        "Personal access tokens → **Fine-grained tokens** → Generate new token  \n"
+        "2. 이 레포만 선택, 권한 **Contents: Read and write** 부여 → 토큰 생성·복사  \n"
+        "3. Streamlit 앱 우상단 **⋮ → Settings → Secrets**에 입력 후 저장:  \n"
+        '```\nGITHUB_TOKEN = \"복사한_토큰\"\nGITHUB_REPO = \"hanallpharm-sys/hira-price-tracker\"\n```\n'
+        "4. 앱이 재시작되면 사유 칸이 입력 가능해집니다."
     )

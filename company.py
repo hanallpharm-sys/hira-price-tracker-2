@@ -121,7 +121,9 @@ def to_excel(maker_kw: str, mat: pd.DataFrame, months, out_path: str):
     ws["A2"].font = Font(size=11, color="6B7A73")
 
     cols = ["code", "name"] + months + ["status"]
-    head_map = {"code": "제품코드", "name": "제품명", "status": "상태"}
+    if "사유" in mat.columns:
+        cols.append("사유")
+    head_map = {"code": "제품코드", "name": "제품명", "status": "상태", "사유": "사유"}
     hr = 4
     for j, c in enumerate(cols, 1):
         cell = ws.cell(hr, j, head_map.get(c, c))
@@ -146,7 +148,7 @@ def to_excel(maker_kw: str, mat: pd.DataFrame, months, out_path: str):
                     cell.fill = DOWN_FILL; cell.font = Font(bold=True, color="1F5FA8")
             if c == "name" and "신규" in str(r["status"]):
                 cell.fill = NEW_FILL
-    widths = {"code": 12, "name": 42, "status": 14}
+    widths = {"code": 12, "name": 42, "status": 14, "사유": 40}
     for j, c in enumerate(cols, 1):
         ws.column_dimensions[ws.cell(hr, j).column_letter].width = widths.get(c, 12)
     ws.freeze_panes = "C5"
